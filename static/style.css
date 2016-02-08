@@ -173,6 +173,12 @@ ol.nav {
 
 /*Layout*/
 
+.page {
+    background: rgba(255, 255, 255, 0.6);
+    height: 100%;
+    padding: 0 1em;
+}
+
 section {
 	clear: both;
 	margin-bottom: 2em;

@@ -11,6 +11,29 @@
 	<link href='https://fonts.googleapis.com/css?family=Signika:400,300' rel='stylesheet' type='text/css'>
     
     <link rel="shortcut icon" href="/static/favicon.png" />
+    
+    <style>
+    body:before {
+        content: "";
+        position: fixed;
+        top: -60px;
+        left: -60px;
+        right: 0;
+        z-index: -1;
+
+        display: block;
+        background-image: url('{% block bg_image %} {% endblock %}');
+        background-size: cover;
+        width: 105%;
+        height: 105%;
+        width: calc(100% + 120px);
+        height: calc(100% + 120px);
+        -webkit-filter: opacity(40%) blur(30px);
+        -moz-filter:    opacity(40%) blur(30px);
+        -ms-filter:     opacity(40%) blur(30px);
+        filter:         opacity(40%) blur(30px);
+    }
+    </style>
 </head>
 <body>
 	<div class="page">
