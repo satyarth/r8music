@@ -17,6 +17,17 @@ def uniq(iter, key=lambda x: x):
 
 def transpose(table, rows):
     return zip(*table) if len(table) != 0 else [[]]*rows
+    
+def merge_dicts(first, *others):
+    """Merge a series of dicts, with the later ones overriding values
+    in previous ones."""
+    
+    new = first.copy()
+    
+    for other in others:
+        new.update(other)
+    
+    return new
 
 def dict_values(dict, keys):
     return [dict[key] if key in dict else None
@@ -137,7 +148,8 @@ def basic_decorator(decorator):
     
     `f` can be called with any additional arguments that the decorator wants
     to provide, which will be given to `f` before the arguments given by the
-    caller of the decorated `f`.
+    caller of the decorated `f`. It can also be called with keyword arguments,
+    whose order in `f` does not matter.
     
     some_value = 1
     
@@ -154,7 +166,7 @@ def basic_decorator(decorator):
 
     def decorated_decorator(f):
         def decorated_f(*f_args, **f_kwargs):
-            call_f = lambda *extra_f_args: f(*(extra_f_args + f_args), **f_kwargs)
+            call_f = lambda *extra_f_args, **extra_f_kw_args: f(*(extra_f_args + f_args), **merge_dicts(f_kwargs, extra_f_kw_args))
             disguise(call_f, f)
             return decorator(call_f)
         
@@ -194,7 +206,7 @@ from time import perf_counter
 
 @basic_decorator
 def execution_time(f):
-    start = perf_counter()                     
+    start = perf_counter()
     result = f()
     duration = (perf_counter() - start)*1000
     
@@ -300,7 +312,7 @@ def guess_wikipedia_page(artist_name):
     except wikipedia.exceptions.PageError:
         pass
         
-    raise(WikipediaPageNotFound)
+    raise WikipediaPageNotFound()
     
 def get_wikipedia_urls(page_title):
     if page_title is None:

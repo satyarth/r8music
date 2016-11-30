@@ -12,8 +12,6 @@ from template_tools import add_template_tools
 from tools import *
 
 app = Flask(__name__)
-#Used to encrypt cookies and session data. Change this to a constant to avoid
-#losing your session when the server restarts
 
 try:
     app.config.from_object("config")
@@ -21,10 +19,12 @@ try:
 except ImportError:
     print("Warning: Config not loaded")
 
-app.secret_key = app.config["APP_SECRET"] 
+#Used to encrypt cookies and session data. Change this to a constant to avoid
+#losing your session when the server restarts
+app.secret_key = app.config["APP_SECRET"]
 app_pool = multiprocessing.pool.ThreadPool(processes=4)
 add_template_tools(app)
-updating = []
+mbids_currently_updating = []
 
 def model():
     if not hasattr(g, "model"):
@@ -35,17 +35,11 @@ def model():
 app.teardown_appcontext(lambda exception: model().close())
 
 def init_db():
-    return
-
     with closing(connect_db()) as db:
         with app.open_resource("schema.sql", mode="r") as f:
             db.cursor().executescript(f.read())
             
         db.commit()
-        
-    Model().register_user("sam", "1", "sam.nipps@gmail")
-    
-    import_artist("DJ Okawari")
 
 def is_safe_url(target):
     ref_url = urlparse(request.host_url)
@@ -137,7 +131,35 @@ def handle_not_found(f, what=None, form=False):
     except NotFound:
         return      (jsonify(error=1), 404) if from_ajax() and not (form or request.form) \
                else page_not_found(what=what)
+
+def request_by_json_missing_value():
+    return jsonify(error=100, message="Missing request field"), 400
+
+@decorator_with_args
+def with_request_values(view, keys, error_view=request_by_json_missing_value):
+    """Looks up keys in request.values and passes them to the given view as
+    keyword arguments. If one is missing, no value is passed to that argument.
+    If that argument had no default value, the exception is caught and an error view is run.
     
+    A key is passed to the keyword argument of the same name. If another name
+    is needed (for example, because the key isn't a valid Python identifier)
+    then that key can be given as a tuple of (key, arg_name)."""
+    
+    def values():
+        for key in keys:
+            key, arg_name = \
+                key if isinstance(key, tuple) else (key, key)
+            
+            if key in request.values:
+                yield arg_name, request.values[key]
+
+    try:
+        return view(**dict(values()))
+        
+    #A non-optional arg wasn't present in request.values
+    except TypeError:
+        return error_view()
+
 # Views
 
 @app.route("/artists")
@@ -153,26 +175,30 @@ def users_index():
 default_search_args = {"type": "artists"}
 search_args = default_search_args.keys()
 
-def only_valid_search_args(args, filter_out=False):
+def only_valid_search_args(args):
     return {k: v for k, v in args.items() if k in search_args}
 
+def only_non_default_search_args(args):
+    return {k: v for k, v in args.items() if v != default_search_args[k]}
+
 @app.route("/search", methods=["GET", "POST"])
-def search():
+@with_request_values(keys=["query"])
+def search(query=""):
     if request.method == "GET":
         return render_template("form.html", form="search", search={"args": default_search_args})
         
     else:
-        query = encode_query_str(request.form["query"])
-        args = only_valid_search_args(request.form)
-        #Only args different from the default
-        args = {k: v for k, v in args.items() if v != default_search_args[k]}
+        query = encode_query_str(query)
+        args = only_valid_search_args(request.values)
+        args = only_non_default_search_args(args)
         
         #Redirect to a GET with the query in the path
         return redirect(url_for("search_results", query=query, **args))
 
 @app.route("/search/<path:query>")
 @app.route("/search/")
-def search_results(query=None):
+@with_request_values(keys=["return_json"])
+def search_results(query=None, return_json=False):
     if not query:
         return redirect(url_for("search"))
 
@@ -182,7 +208,7 @@ def search_results(query=None):
 
     results = model().search(query, **args)
     
-    if "json" in request.values and request.values["json"]:
+    if return_json:
         return jsonify(results=results)
 
     def clear_match(query, results):
@@ -198,31 +224,24 @@ def search_results(query=None):
 @app.route("/track/<int:track_id>", methods=["POST"])
 @handle_not_found(what="track")
 @needs_auth
-def track_post(track_id):
-    try:
-        if request.values["action"] in ["pick", "unpick"]:
-            model().add_action(request.user.id, track_id, ActionType[request.values["action"]])
-            return jsonify(error=0)
-        
-        else:
-            return jsonify(error=2), 400 #HTTPStatus.BAD_REQUEST
-        
-    except KeyError:
+@with_request_values(keys=["action"])
+def track_post(track_id, action):
+    if action in ["pick", "unpick"]:
+        model().add_action(request.user.id, track_id, ActionType[action])
+        return jsonify(error=0)
+    
+    else:
         return jsonify(error=1), 400 #HTTPStatus.BAD_REQUEST
 
 #The route /<artist>/<release> is added later because it would override other routes
 @app.route("/<artist_slug>/<release_slug>/<any(reviews, activity, recommendations):tab>")
 @handle_not_found()
-def release_page(artist_slug, release_slug, tab=None):
+@with_request_values(keys=["compare"])
+def release_page(artist_slug, release_slug, tab=None, compare=None):
     release = model().get_release_by_slug(artist_slug, release_slug)
+    user_to_compare = model().get_user(compare) if compare else None
     
     if request.method == "GET":
-        try:
-            user_to_compare = model().get_user(request.values["compare"])
-
-        except (NameError, KeyError):
-            user_to_compare = None
-
         return render_template("release.html", release=release, tab=tab, user=request.user, user_to_compare=user_to_compare)
         
     else:
@@ -231,18 +250,15 @@ def release_page(artist_slug, release_slug, tab=None):
 @app.route("/release/<int:release_id>", methods=["POST"])
 @handle_not_found(what="release")
 @needs_auth
-def release_post(release_id):
+@with_request_values(keys=["action"])
+def release_post(release_id, action):
     def rating_stats():
         rating_stats = RatingStats(model().get_ratings(release_id))
         return jsonify(error=0,
                        ratingAverage=rating_stats.average,
                        ratingFrequency=rating_stats.frequency)
 
-    try:
-        action = ActionType[request.values["action"]]
-        
-    except KeyError:
-        return jsonify(error=1), 400 #HTTPStatus.BAD_REQUEST
+    action = ActionType[action]
     
     if action in [ActionType.rate, ActionType.unrate]:
         try:
@@ -293,11 +309,11 @@ def add_artist():
             #todo ajax progress
             mbid = MBID(request.form["artist-id" if "artist-id" in request.form else "release-id"])
 
-            if mbid not in updating:
-                updating.append(mbid)
+            if mbid not in mbids_currently_updating:
+                mbids_currently_updating.append(mbid)
                 app_pool.apply_async(import_artist if "artist-id" in request.form else import_release,
                                      (mbid,),
-                                     callback=lambda _:updating.remove(mbid))
+                                     callback=lambda _: mbids_currently_updating.remove(mbid))
                 flash("The artist will be added soon", "success")
                 return redirect(url_for("artists_index"))
 
@@ -315,20 +331,15 @@ def add_artist():
 @app.route("/add-artist-search/<path:query>", methods=["GET", "POST"])
 @app.route("/add-artist-search/", methods=["GET"])
 @needs_auth
-def add_artist_search_results(query=None):
+@with_request_values(keys=["query_type", "return_json"])
+def add_artist_search_results(query=None, query_type="artist", return_json=False):
     if not query:
         return redirect(url_for("add_artist"))
         
     query = decode_query_str(query)
-    try:
-        query_type = request.values['query_type']
-    
-    except KeyError:
-        query_type = 'artist'
-
     results = search_mb(query, query_type=query_type)
 
-    if "json" in request.values and request.values["json"]:
+    if return_json:
         return jsonify(results=results)
 
     return render_template("add_artist_search_results.html", results=results, query=query, query_type=query_type)
@@ -338,13 +349,13 @@ def add_artist_search_results(query=None):
 def update_artist(id):
     artist_mbid = MBID(model().get_link(id, "musicbrainz"))
 
-    if artist_mbid in updating:
+    if artist_mbid in mbids_currently_updating:
         flash("The artist is currently being updated", "error")
         return redirect_back()
 
-    updating.append(artist_mbid)
+    mbids_currently_updating.append(artist_mbid)
     flash("The artist will be updated", "success")
-    app_pool.apply_async(import_artist, (artist_mbid,), callback=lambda _:updating.remove(artist_mbid))
+    app_pool.apply_async(import_artist, (artist_mbid,), callback=lambda _:mbids_currently_updating.remove(artist_mbid))
     return redirect_back()
 
 @app.route("/")
@@ -602,5 +613,4 @@ app.add_url_rule("/<artist_slug>/<release_slug>", view_func=release_page)
 #
 
 if __name__ == "__main__":
-    init_db()
     app.run(debug=True)
